@@ -20,6 +20,7 @@ import androidx.benchmark.junit4.BenchmarkRule
 import androidx.benchmark.junit4.measureRepeatedOnMainThread
 import androidx.compose.runtime.InternalComposeApi
 import androidx.compose.runtime.launchComposeCoroutine
+import androidx.compose.runtime.launchSingleThreadComposeCoroutine
 import androidx.compose.runtime.suspendComposeCancellableCoroutine
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -76,6 +77,20 @@ class ComposeCoroutineBenchmark {
         benchmarkRule.measureRepeatedOnMainThread {
             val job =
                 launchComposeCoroutine(coroutineContext) {
+                    suspendComposeCancellableCoroutine { cont ->
+                        field = { cont.resume(Unit) }
+                        cont.invokeOnCancellation { field = null }
+                    }
+                }
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun singleThreadComposeCoroutine() = runBlockingTestWithFrameClock {
+        benchmarkRule.measureRepeatedOnMainThread {
+            val job =
+                launchSingleThreadComposeCoroutine(coroutineContext) {
                     suspendComposeCancellableCoroutine { cont ->
                         field = { cont.resume(Unit) }
                         cont.invokeOnCancellation { field = null }

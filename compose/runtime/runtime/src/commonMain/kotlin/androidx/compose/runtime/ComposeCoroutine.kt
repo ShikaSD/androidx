@@ -28,6 +28,7 @@ import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
 import kotlin.coroutines.intrinsics.intercepted
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
+import kotlin.coroutines.intrinsics.startCoroutineUninterceptedOrReturn
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.startCoroutine
@@ -169,9 +170,61 @@ public fun launchComposeCoroutine(
     return handle
 }
 
+/**
+ * Launch [block] on the current thread without replacing [context]'s [ContinuationInterceptor].
+ *
+ * This assumes Compose-owned children and suspension points. It exists so we can benchmark the
+ * lower-overhead primitive side by side with [launchComposeCoroutine], which keeps the broader
+ * interop behavior.
+ */
+@InternalComposeApi
+public fun launchSingleThreadComposeCoroutine(
+    context: CoroutineContext,
+    block: suspend CoroutineScope.() -> Unit,
+): ComposeCoroutineHandle {
+    val parentJob = context[Job]
+    val handle = ComposeCoroutineHandleImpl(parentJob)
+    val fallbackContext = context
+    val originalInterceptor = fallbackContext[ContinuationInterceptor]
+    val state =
+        ComposeCoroutineState(
+            handle = handle,
+            parentJob = parentJob,
+            ownerThreadId = currentThreadId(),
+            fallbackContext = fallbackContext,
+            fallbackInterceptor = originalInterceptor,
+        )
+    val fastContext = fallbackContext + ComposeCoroutineElement(state)
+    if (!handle.isActive) {
+        handle.complete()
+        return handle
+    }
+
+    val scope =
+        object : CoroutineScope {
+            override val coroutineContext: CoroutineContext = fastContext
+        }
+    val completion =
+        object : Continuation<Unit> {
+            override val context: CoroutineContext = fastContext
+
+            override fun resumeWith(result: Result<Unit>) {
+                completeComposeCoroutine(handle, fastContext, result)
+            }
+        }
+
+    val result = block.startCoroutineUninterceptedOrReturn(scope, completion)
+    if (result !== COROUTINE_SUSPENDED) {
+        completeComposeCoroutine(handle, fastContext, Result.success(Unit))
+    }
+    return handle
+}
+
 @InternalComposeApi
 public val CoroutineContext.composeCoroutineHandle: ComposeCoroutineHandle?
-    get() = (this[ContinuationInterceptor] as? ComposeCoroutineInterceptor)?.handle
+    get() =
+        this[ComposeCoroutineElement]?.handle
+            ?: (this[ContinuationInterceptor] as? ComposeCoroutineInterceptor)?.handle
 
 @InternalComposeApi
 public suspend fun <T> suspendComposeCancellableCoroutine(
@@ -189,10 +242,21 @@ private suspend fun <T> suspendComposeCancellableCoroutineFast(
     block: (ComposeCancellableContinuation<T>) -> Unit
 ): T =
     suspendCoroutineUninterceptedOrReturn { continuation ->
-        val intercepted = continuation.intercepted()
-        val safeContinuation = ComposeSafeContinuation(intercepted)
-        block(ComposeCancellableContinuationImpl(safeContinuation, intercepted))
-        safeContinuation.getOrThrow()
+        val composeElement = continuation.context[ComposeCoroutineElement]
+        if (composeElement != null) {
+            val state = composeElement.state
+            val safeContinuation = SingleThreadComposeSafeContinuation(state, continuation)
+            val cancellableContinuation =
+                SingleThreadComposeCancellableContinuationImpl(safeContinuation)
+            state.handle.register(cancellableContinuation)
+            block(cancellableContinuation)
+            safeContinuation.getOrThrow()
+        } else {
+            val intercepted = continuation.intercepted()
+            val safeContinuation = ComposeSafeContinuation(intercepted)
+            block(ComposeCancellableContinuationImpl(safeContinuation, intercepted))
+            safeContinuation.getOrThrow()
+        }
     }
 
 private class ComposeCoroutineState(
@@ -211,7 +275,16 @@ private class ComposeCoroutineState(
     }
 }
 
-private class ComposeCoroutineInterceptor(private val state: ComposeCoroutineState) :
+private class ComposeCoroutineElement(val state: ComposeCoroutineState) :
+    AbstractCoroutineContextElement(ComposeCoroutineElement) {
+    companion object Key : CoroutineContext.Key<ComposeCoroutineElement>
+
+    @OptIn(InternalComposeApi::class)
+    val handle: ComposeCoroutineHandle
+        get() = state.handle
+}
+
+private class ComposeCoroutineInterceptor(val state: ComposeCoroutineState) :
     AbstractCoroutineContextElement(ContinuationInterceptor), ContinuationInterceptor {
     @OptIn(InternalComposeApi::class)
     val handle: ComposeCoroutineHandle
@@ -221,10 +294,14 @@ private class ComposeCoroutineInterceptor(private val state: ComposeCoroutineSta
         ComposeContinuation(state, continuation)
 }
 
+private interface ComposeCancellationTarget {
+    fun cancel(cause: CancellationException)
+}
+
 private class ComposeContinuation<T>(
     private val state: ComposeCoroutineState,
     private val continuation: Continuation<T>,
-) : Continuation<T> {
+) : Continuation<T>, ComposeCancellationTarget {
     private var cancellationResumed = false
     private var cancellationCause: CancellationException? = null
     private var cancellationCallback: ((CancellationException) -> Unit)? = null
@@ -255,7 +332,7 @@ private class ComposeContinuation<T>(
         }
     }
 
-    fun cancel(cause: CancellationException) {
+    override fun cancel(cause: CancellationException) {
         if (!cancellationResumed) {
             cancellationResumed = true
             cancellationCause = cause
@@ -331,6 +408,73 @@ private class ComposeSafeContinuation<T>(private val delegate: Continuation<T>) 
     private class Completed<T>(val result: Result<T>)
 }
 
+private class SingleThreadComposeSafeContinuation<T>(
+    private val state: ComposeCoroutineState,
+    private val delegate: Continuation<T>,
+) : Continuation<T> {
+    private var stateValue: Any? = Undecided
+
+    override val context: CoroutineContext
+        get() = delegate.context
+
+    override fun resumeWith(result: Result<T>) {
+        val resumeResult = if (result.isSuccess) result.withCancellation(state.handle) else result
+        when (stateValue) {
+            Undecided -> stateValue = Completed(resumeResult)
+            Suspended -> {
+                stateValue = Resumed
+                resumeDelegate(resumeResult)
+            }
+            else -> throw IllegalStateException("Already resumed")
+        }
+    }
+
+    fun getOrThrow(): Any? {
+        val current = stateValue
+        if (current === Undecided) {
+            stateValue = Suspended
+            return COROUTINE_SUSPENDED
+        }
+        if (current === Suspended) return COROUTINE_SUSPENDED
+        @Suppress("UNCHECKED_CAST")
+        return (current as Completed<T>).result.getOrThrow()
+    }
+
+    private fun resumeDelegate(result: Result<T>) {
+        if (state.shouldResumeDirectly()) {
+            delegate.resumeWith(result)
+        } else {
+            state.markHandedOff()
+            resumeWithFallback(result)
+        }
+    }
+
+    private fun resumeWithFallback(result: Result<T>) {
+        when (val interceptor = state.fallbackInterceptor) {
+            is CoroutineDispatcher -> {
+                interceptor.dispatch(state.fallbackContext) {
+                    delegate.resumeWith(result.withCancellation(state.handle))
+                }
+            }
+            null -> {
+                CoroutineScope(state.fallbackContext).launch {
+                    delegate.resumeWith(result.withCancellation(state.handle))
+                }
+            }
+            else -> {
+                interceptor
+                    .interceptContinuation(delegate)
+                    .resumeWith(result.withCancellation(state.handle))
+            }
+        }
+    }
+
+    private object Undecided
+    private object Suspended
+    private object Resumed
+    private class Completed<T>(val result: Result<T>)
+}
+
 private class ComposeCancellableContinuationImpl<T>(
     private val continuation: ComposeSafeContinuation<T>,
     intercepted: Continuation<T>,
@@ -354,6 +498,49 @@ private class ComposeCancellableContinuationImpl<T>(
 
     override fun invokeOnCancellation(onCancellation: (CancellationException) -> Unit) {
         composeContinuation?.invokeOnCancellation(onCancellation)
+    }
+}
+
+private class SingleThreadComposeCancellableContinuationImpl<T>(
+    private val continuation: SingleThreadComposeSafeContinuation<T>
+) : ComposeCancellableContinuation<T>, ComposeCancellationTarget {
+    private var cancellationResumed = false
+    private var cancellationCause: CancellationException? = null
+    private var cancellationCallback: ((CancellationException) -> Unit)? = null
+
+    override val context: CoroutineContext
+        get() = continuation.context
+
+    override fun resume(value: T) {
+        continuation.resume(value)
+    }
+
+    override fun resumeWithException(exception: Throwable) {
+        continuation.resumeWithException(exception)
+    }
+
+    override fun resumeWith(result: Result<T>) {
+        continuation.resumeWith(result)
+    }
+
+    override fun invokeOnCancellation(onCancellation: (CancellationException) -> Unit) {
+        val currentCause = cancellationCause
+        if (currentCause != null) {
+            onCancellation(currentCause)
+            return
+        }
+        cancellationCallback = onCancellation
+    }
+
+    override fun cancel(cause: CancellationException) {
+        if (!cancellationResumed) {
+            cancellationResumed = true
+            cancellationCause = cause
+            val callback = cancellationCallback
+            cancellationCallback = null
+            callback?.invoke(cause)
+            continuation.resumeWith(Result.failure(cause))
+        }
     }
 }
 
@@ -430,7 +617,7 @@ private class CompletedComposeCoroutine(val cause: Throwable?) : ComposeCoroutin
 @OptIn(InternalComposeApi::class)
 private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHandle {
     private var state: ComposeCoroutineHandleState = ActiveComposeCoroutine(null, emptyList())
-    private var currentContinuation: ComposeContinuation<*>? = null
+    private var currentContinuation: ComposeCancellationTarget? = null
     private var currentKotlinxJob: Job? = null
     private val parentCompletionHandle: DisposableHandle?
 
@@ -501,7 +688,7 @@ private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHand
         }
     }
 
-    fun register(continuation: ComposeContinuation<*>) {
+    fun register(continuation: ComposeCancellationTarget) {
         currentContinuation = continuation
     }
 
