@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+@file:OptIn(androidx.compose.runtime.InternalComposeApi::class)
+
 package androidx.compose.foundation.gestures
 
 import androidx.compose.animation.core.VectorConverter
@@ -24,6 +26,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.OverscrollEffect
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.launchComposeCoroutine
 import androidx.compose.runtime.Stable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -42,7 +45,6 @@ import kotlin.math.pow
 import kotlin.math.sign
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlinx.coroutines.launch
 
 /**
  * Configure touch scrolling and flinging for the UI element in both XY orientations.
@@ -194,19 +196,19 @@ internal class Scrollable2DNode(
 
     override fun onDragStopped(event: DragEvent.DragStopped) {
         if (isClearNestedScrollCoroutineScopeFixEnabled && !isAttached) return
-        nestedScrollDispatcher.coroutineScope.launch {
+        nestedScrollDispatcher.coroutineScope.launchComposeCoroutine {
             scrollLogic.onScrollStopped(event.velocity, isMouseWheel = false)
         }
     }
 
     private fun onMouseWheelScrollStopped(velocity: Velocity) {
-        nestedScrollDispatcher.coroutineScope.launch {
+        nestedScrollDispatcher.coroutineScope.launchComposeCoroutine {
             scrollLogic.onScrollStopped(velocity, isMouseWheel = true)
         }
     }
 
     private fun onTrackpadScrollStopped(velocity: Velocity) {
-        nestedScrollDispatcher.coroutineScope.launch {
+        nestedScrollDispatcher.coroutineScope.launchComposeCoroutine {
             scrollLogic.onScrollStopped(velocity, isMouseWheel = false)
         }
     }

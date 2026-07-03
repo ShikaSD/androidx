@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+@file:OptIn(androidx.compose.runtime.InternalComposeApi::class)
+
 package androidx.compose.material3
 
 import androidx.annotation.FloatRange
@@ -23,6 +25,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollIndicatorState
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ComposeCoroutineHandle
+import androidx.compose.runtime.InternalComposeApi
+import androidx.compose.runtime.launchComposeCoroutine
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -39,9 +44,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlin.time.Duration.Companion.milliseconds
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * A scrollbar that represents the current scroll position of a scrolling component.
@@ -408,7 +412,7 @@ private class ScrollbarNode(
     private var cachedThicknessPx = -1f
     private var cachedCornerRadius = CornerRadius.Zero
     private var lastOffset = -1
-    private var fadeJob: Job? = null
+    private var fadeJob: ComposeCoroutineHandle? = null
 
     override fun onDetach() {
         fadeJob?.cancel()
@@ -435,7 +439,7 @@ private class ScrollbarNode(
 
             fadeJob?.cancel()
             fadeJob =
-                coroutineScope.launch {
+                coroutineScope.launchScrollbarCoroutine {
                     if (alpha.value != 1f) {
                         alpha.snapTo(1f)
                     }
@@ -559,3 +563,8 @@ private class ScrollbarNode(
         }
     }
 }
+
+@OptIn(InternalComposeApi::class)
+private fun CoroutineScope.launchScrollbarCoroutine(
+    block: suspend CoroutineScope.() -> Unit
+): ComposeCoroutineHandle = launchComposeCoroutine(coroutineContext, block)

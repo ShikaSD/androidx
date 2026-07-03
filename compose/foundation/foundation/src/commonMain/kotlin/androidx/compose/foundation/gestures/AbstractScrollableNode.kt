@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+@file:OptIn(androidx.compose.runtime.InternalComposeApi::class)
+
 package androidx.compose.foundation.gestures
 
 import androidx.compose.animation.core.AnimationState
@@ -24,6 +26,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.OverscrollEffect
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.internal.PlatformOptimizedCancellationException
+import androidx.compose.foundation.launchComposeCoroutine
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -46,7 +49,6 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.util.fastAny
 import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Base class for 1-D ([ScrollableNode]) and 2-D ([Scrollable2DNode]) scrollable nodes. */
@@ -184,7 +186,7 @@ internal abstract class AbstractScrollableNode(
 
     private fun setScrollSemanticsActions() {
         scrollByAction = { x, y ->
-            coroutineScope.launch { semanticsScrollBy(Offset(x, y)) }
+            coroutineScope.launchComposeCoroutine { semanticsScrollBy(Offset(x, y)) }
             true
         }
 

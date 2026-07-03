@@ -18,12 +18,15 @@ package androidx.compose.animation.core
 
 import androidx.compose.animation.core.tooling.AnimateValueAsStateToolingHandle
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ComposeCoroutineHandle
+import androidx.compose.runtime.ComposeCoroutineScope
+import androidx.compose.runtime.InternalComposeApi
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberComposeCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -31,10 +34,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 private val defaultAnimation = spring<Float>()
 
@@ -404,6 +403,7 @@ private val intSizeDefaultSpring = spring(visibilityThreshold = IntSize.Visibili
  * @return A [State] object, the value of which is updated by animation.
  */
 @Composable
+@OptIn(InternalComposeApi::class)
 public fun <T, V : AnimationVector> animateValueAsState(
     targetValue: T,
     typeConverter: TwoWayConverter<T, V>,
@@ -412,7 +412,7 @@ public fun <T, V : AnimationVector> animateValueAsState(
     label: String = "ValueAnimation",
     finishedListener: ((T) -> Unit)? = null,
 ): State<T> {
-    val coroutineScope = rememberCoroutineScope()
+    val coroutineScope = rememberComposeCoroutineScope()
     var updating = true
     val state = remember {
         AnimateAsState(
@@ -444,6 +444,7 @@ public fun <T, V : AnimationVector> animateValueAsState(
     return state
 }
 
+@OptIn(InternalComposeApi::class)
 private class AnimateAsState<T, V : AnimationVector>(
     initialValue: T,
     typeConverter: TwoWayConverter<T, V>,
@@ -451,11 +452,11 @@ private class AnimateAsState<T, V : AnimationVector>(
     visibilityThreshold: T?,
     label: String,
     var finishedListener: ((T) -> Unit)?,
-    private val coroutineScope: CoroutineScope,
+    private val coroutineScope: ComposeCoroutineScope,
 ) : State<T>, AnimateValueAsStateToolingHandle<T, V> {
     override var animatable = Animatable(initialValue, typeConverter, visibilityThreshold, label)
     override var animationSpec = resolveAnimationSpec(animationSpec, visibilityThreshold)
-    private var job: Job? = null
+    private var job: ComposeCoroutineHandle? = null
 
     private var toolingOverride: State<T>? by mutableStateOf(null)
 
@@ -476,6 +477,7 @@ private class AnimateAsState<T, V : AnimationVector>(
     ) {
         var restartAnimation = false
         if (animatable.typeConverter !== typeConverter || animatable.label != label) {
+            job?.cancel()
             animatable = Animatable(animatable.value, typeConverter, visibilityThreshold, label)
             restartAnimation = true
         }
@@ -493,16 +495,11 @@ private class AnimateAsState<T, V : AnimationVector>(
     }
 
     private fun restartAnimation(newTarget: T, animSpec: AnimationSpec<T>) {
-        if (job != null) {
-            job?.cancel()
-        }
+        job?.cancel()
         if (animatable.targetValue == newTarget) return
 
         job =
-            coroutineScope.launch(
-                // undispatched to allow for continuous progress when target changes every frame
-                start = CoroutineStart.UNDISPATCHED
-            ) {
+            coroutineScope.launch {
                 animatable.animateTo(newTarget, animSpec)
                 finishedListener?.invoke(animatable.value)
             }

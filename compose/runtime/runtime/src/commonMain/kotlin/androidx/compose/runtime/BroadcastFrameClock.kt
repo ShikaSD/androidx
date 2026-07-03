@@ -18,9 +18,7 @@ package androidx.compose.runtime
 
 import androidx.compose.runtime.internal.AwaiterQueue
 import kotlin.coroutines.resumeWithException
-import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * A simple frame clock.
@@ -36,10 +34,14 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 public class BroadcastFrameClock(private val onNewAwaiters: (() -> Unit)? = null) :
     MonotonicFrameClock {
 
-    private class FrameAwaiter<R>(onFrame: (Long) -> R, continuation: CancellableContinuation<R>) :
+    @OptIn(InternalComposeApi::class)
+    private class FrameAwaiter<R>(
+        onFrame: (Long) -> R,
+        continuation: ComposeCancellableContinuation<R>,
+    ) :
         AwaiterQueue.Awaiter() {
 
-        private var continuation: CancellableContinuation<R>? = continuation
+        private var continuation: ComposeCancellableContinuation<R>? = continuation
         private var onFrame: ((Long) -> R)? = onFrame
 
         override fun cancel() {
@@ -71,8 +73,9 @@ public class BroadcastFrameClock(private val onNewAwaiters: (() -> Unit)? = null
         queue.flushAndDispatchAwaiters { awaiter -> awaiter.resume(timeNanos) }
     }
 
+    @OptIn(InternalComposeApi::class)
     override suspend fun <R> withFrameNanos(onFrame: (Long) -> R): R =
-        suspendCancellableCoroutine { co ->
+        suspendComposeCancellableCoroutine { co ->
             val cancellationHandle = queue.addAwaiter(FrameAwaiter(onFrame, co), onNewAwaiters)
             co.invokeOnCancellation { cancellationHandle.cancel() }
         }

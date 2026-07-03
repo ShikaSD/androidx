@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+@file:OptIn(androidx.compose.runtime.InternalComposeApi::class)
+
 package androidx.compose.foundation
 
 import androidx.annotation.CallSuper
@@ -25,6 +27,7 @@ import androidx.compose.foundation.interaction.HoverInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.internal.requirePrecondition
+import androidx.compose.runtime.ComposeCoroutineHandle
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -82,7 +85,6 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * Configure component to receive clicks via input or accessibility "click" event.
@@ -1078,23 +1080,23 @@ private class CombinedClickableNode(
         role = role,
         onClick = onClick,
     ) {
-    class DoubleKeyClickState(val job: Job) {
+    class DoubleKeyClickState(val job: ComposeCoroutineHandle) {
         var doubleTapMinTimeMillisElapsed: Boolean = false
     }
 
-    private val longKeyPressJobs = mutableLongObjectMapOf<Job>()
+    private val longKeyPressJobs = mutableLongObjectMapOf<ComposeCoroutineHandle>()
     private val doubleKeyClickStates = mutableLongObjectMapOf<DoubleKeyClickState>()
     private var downEvent: PointerInputChange? = null
-    private var longPressJob: Job? = null
-    private var tapJob: Job? = null
+    private var longPressJob: ComposeCoroutineHandle? = null
+    private var tapJob: ComposeCoroutineHandle? = null
     private var isSecondTap = false
     private var longPressTriggered = false
     private var firstTapUpTime = -1L
     private var ignoreNextUp = false
 
     private var indirectDownEvent: IndirectPointerInputChange? = null
-    private var indirectLongPressJob: Job? = null
-    private var indirectTapJob: Job? = null
+    private var indirectLongPressJob: ComposeCoroutineHandle? = null
+    private var indirectTapJob: ComposeCoroutineHandle? = null
     private var indirectIsSecondTap = false
     private var indirectLongPressTriggered = false
     private var indirectFirstTapUpTime = -1L
@@ -1221,7 +1223,7 @@ private class CombinedClickableNode(
 
             if (onLongClick != null) {
                 longPressJob =
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         delay(currentValueOf(LocalViewConfiguration).longPressTimeoutMillis)
                         onLongClick?.invoke()
                         if (hapticFeedbackEnabled) {
@@ -1262,7 +1264,7 @@ private class CombinedClickableNode(
 
             if (onLongClick != null) {
                 indirectLongPressJob =
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         delay(currentValueOf(LocalViewConfiguration).longPressTimeoutMillis)
                         onLongClick?.invoke()
                         if (hapticFeedbackEnabled) {
@@ -1290,7 +1292,7 @@ private class CombinedClickableNode(
                         // Play the click sound immediately, even if it later becomes a double click
                         playClickSound()
                         tapJob =
-                            coroutineScope.launch {
+                            coroutineScope.launchComposeCoroutine {
                                 delay(currentValueOf(LocalViewConfiguration).doubleTapTimeoutMillis)
                                 // Only call onClick() since we already played the sound
                                 onClick()
@@ -1322,7 +1324,7 @@ private class CombinedClickableNode(
                         // Play the click sound immediately, even if it later becomes a double click
                         playClickSound()
                         indirectTapJob =
-                            coroutineScope.launch {
+                            coroutineScope.launchComposeCoroutine {
                                 delay(currentValueOf(LocalViewConfiguration).doubleTapTimeoutMillis)
                                 // Only call onClick() since we already played the sound
                                 onClick()
@@ -1521,7 +1523,7 @@ private class CombinedClickableNode(
         if (onLongClick != null) {
             if (longKeyPressJobs[keyCode] == null) {
                 longKeyPressJobs[keyCode] =
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         delay(currentValueOf(LocalViewConfiguration).longPressTimeoutMillis)
                         onLongClick?.invoke()
                     }
@@ -1577,7 +1579,7 @@ private class CombinedClickableNode(
                         playClickSound()
                         doubleKeyClickStates[keyCode] =
                             DoubleKeyClickState(
-                                coroutineScope.launch {
+                                coroutineScope.launchComposeCoroutine {
                                     val configuration = currentValueOf(LocalViewConfiguration)
                                     val minTime = configuration.doubleTapMinTimeMillis
                                     val timeout = configuration.doubleTapTimeoutMillis
@@ -1866,10 +1868,14 @@ internal abstract class AbstractClickableNode(
             // clear them and cancel the presses.
             if (interactionSource != null) {
                 currentKeyPressInteractions.forEachValue {
-                    coroutineScope.launch { interactionSource?.emit(PressInteraction.Cancel(it)) }
+                    coroutineScope.launchComposeCoroutine {
+                        interactionSource?.emit(PressInteraction.Cancel(it))
+                    }
                 }
                 indirectPointerPressInteraction?.let {
-                    coroutineScope.launch { interactionSource?.emit(PressInteraction.Cancel(it)) }
+                    coroutineScope.launchComposeCoroutine {
+                        interactionSource?.emit(PressInteraction.Cancel(it))
+                    }
                 }
             }
             currentKeyPressInteractions.clear()
@@ -1922,8 +1928,10 @@ internal abstract class AbstractClickableNode(
             initializeGestureCoordination()
             if (pass == PointerEventPass.Main) {
                 when (pointerEvent.type) {
-                    PointerEventType.Enter -> coroutineScope.launch { emitHoverEnter() }
-                    PointerEventType.Exit -> coroutineScope.launch { emitHoverExit() }
+                    PointerEventType.Enter ->
+                        coroutineScope.launchComposeCoroutine { emitHoverEnter() }
+                    PointerEventType.Exit ->
+                        coroutineScope.launchComposeCoroutine { emitHoverExit() }
                 }
             }
         }
@@ -1958,7 +1966,7 @@ internal abstract class AbstractClickableNode(
                     // Even if the interactionSource is null, we still want to intercept the presses
                     // so we always track them above, and return true
                     if (interactionSource != null) {
-                        coroutineScope.launch { interactionSource?.emit(press) }
+                        coroutineScope.launchComposeCoroutine { interactionSource?.emit(press) }
                     }
                     wasInteractionHandled = true
                 }
@@ -1969,7 +1977,7 @@ internal abstract class AbstractClickableNode(
                 val press = currentKeyPressInteractions.remove(keyCode)
                 if (press != null) {
                     if (interactionSource != null) {
-                        coroutineScope.launch {
+                        coroutineScope.launchComposeCoroutine {
                             interactionSource?.emit(PressInteraction.Release(press))
                         }
                     }
@@ -2019,7 +2027,7 @@ internal abstract class AbstractClickableNode(
         applyAdditionalSemantics()
     }
 
-    private var delayJob: Job? = null
+    private var delayJob: ComposeCoroutineHandle? = null
 
     /** Handles emitting a [PressInteraction.Press]. */
     protected fun handlePressInteractionStart(event: IndirectPointerInputChange) {
@@ -2027,14 +2035,14 @@ internal abstract class AbstractClickableNode(
             val press = PressInteraction.Press(event.position)
             if (delayPressInteraction()) {
                 delayJob =
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         delay(TapIndicationDelay)
                         interactionSource.emit(press)
                         indirectPointerPressInteraction = press
                     }
             } else {
                 indirectPointerPressInteraction = press
-                coroutineScope.launch { interactionSource.emit(press) }
+                coroutineScope.launchComposeCoroutine { interactionSource.emit(press) }
             }
         }
     }
@@ -2044,14 +2052,14 @@ internal abstract class AbstractClickableNode(
             val press = PressInteraction.Press(event.position)
             if (delayPressInteraction()) {
                 delayJob =
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         delay(TapIndicationDelay)
                         interactionSource.emit(press)
                         pressInteraction = press
                     }
             } else {
                 pressInteraction = press
-                coroutineScope.launch { interactionSource.emit(press) }
+                coroutineScope.launchComposeCoroutine { interactionSource.emit(press) }
             }
         }
     }
@@ -2080,7 +2088,7 @@ internal abstract class AbstractClickableNode(
                 // start = CoroutineStart.UNDISPATCHED, but it is more reasonable to cancel
                 // outside the coroutine in any case.
                 job.cancel()
-                coroutineScope.launch {
+                coroutineScope.launchComposeCoroutine {
                     // Wait for cancelling the job to finish if needed
                     job.join()
                     // The press released successfully, before the timeout duration - emit the press
@@ -2094,7 +2102,7 @@ internal abstract class AbstractClickableNode(
                 val interaction =
                     if (indirectPointer) indirectPointerPressInteraction else pressInteraction
                 interaction?.let {
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         // Important that we capture `interaction` outside the `launch`, rather than
                         // referring to it in here - the underlying fields are mutable and could
                         // change by the time this coroutine is executed
@@ -2138,7 +2146,7 @@ internal abstract class AbstractClickableNode(
                         coroutineScope.coroutineContext[Job]?.invokeOnCompletion {
                             interactionSource.tryEmit(endInteraction)
                         }
-                    coroutineScope.launch {
+                    coroutineScope.launchComposeCoroutine {
                         interactionSource.emit(endInteraction)
                         handler?.dispose()
                     }
@@ -2159,7 +2167,7 @@ internal abstract class AbstractClickableNode(
         if (hoverInteraction == null) {
             val interaction = HoverInteraction.Enter()
             interactionSource?.let { interactionSource ->
-                coroutineScope.launch { interactionSource.emit(interaction) }
+                coroutineScope.launchComposeCoroutine { interactionSource.emit(interaction) }
             }
             hoverInteraction = interaction
         }
@@ -2169,7 +2177,7 @@ internal abstract class AbstractClickableNode(
         hoverInteraction?.let { oldValue ->
             val interaction = HoverInteraction.Exit(oldValue)
             interactionSource?.let { interactionSource ->
-                coroutineScope.launch { interactionSource.emit(interaction) }
+                coroutineScope.launchComposeCoroutine { interactionSource.emit(interaction) }
             }
             hoverInteraction = null
         }

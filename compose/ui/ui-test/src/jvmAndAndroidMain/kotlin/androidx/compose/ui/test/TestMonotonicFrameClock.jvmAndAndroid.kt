@@ -18,7 +18,9 @@
 
 package androidx.compose.ui.test
 
+import androidx.compose.runtime.InternalComposeApi
 import androidx.compose.runtime.MonotonicFrameClock
+import androidx.compose.runtime.suspendComposeCancellableCoroutine
 import androidx.compose.ui.test.platform.makeSynchronizedObject
 import androidx.compose.ui.test.platform.synchronized
 import kotlin.coroutines.ContinuationInterceptor
@@ -27,7 +29,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.test.TestCoroutineScheduler
 
 private const val DefaultFrameDelay = 16_000_000L
@@ -50,6 +51,9 @@ private const val DefaultFrameDelay = 16_000_000L
  *   continuations resumed while running frame callbacks or [onPerformTraversals] will not be
  *   dispatched until after [onPerformTraversals] finishes. If [onPerformTraversals] throws, all
  *   `withFrameNanos` callers will be cancelled.
+ * @param autoScheduleFrameDispatch Whether the first awaiter for a pending frame should schedule
+ *   that frame by launching into [coroutineScope]. Set to `false` when an external test driver
+ *   advances time and calls [performFrame] explicitly.
  */
 // This is intentionally not OptIn, because we want to communicate to consumers that by using this
 // API, they're also transitively getting all the experimental risk of using the experimental API
@@ -61,6 +65,7 @@ class TestMonotonicFrameClock(
     @get:Suppress("MethodNameUnits") // Nanos for high-precision animation clocks
     val frameDelayNanos: Long = DefaultFrameDelay,
     private val onPerformTraversals: (Long) -> Unit = {},
+    private val autoScheduleFrameDispatch: Boolean = true,
 ) : MonotonicFrameClock {
     private val delayController =
         requireNotNull(coroutineScope.coroutineContext[TestCoroutineScheduler]) {
@@ -83,6 +88,10 @@ class TestMonotonicFrameClock(
             frameDeferringInterceptor.hasTrampolinedTasks ||
                 synchronized(lock) { awaiters.isNotEmpty() }
 
+    /** Returns whether a frame has been requested but not yet dispatched. */
+    val hasScheduledFrameDispatch: Boolean
+        get() = synchronized(lock) { scheduledFrameDispatch }
+
     /**
      * A [CoroutineDispatcher] that will defer continuation resumptions requested within
      * [withFrameNanos] calls to until after the frame callbacks have finished running. Resumptions
@@ -102,16 +111,27 @@ class TestMonotonicFrameClock(
      * test coroutine scheduler will actually complete immediately without waiting), and then run
      * all scheduled tasks.
      */
+    @OptIn(InternalComposeApi::class)
     override suspend fun <R> withFrameNanos(onFrame: (frameTimeNanos: Long) -> R): R =
-        suspendCancellableCoroutine { co ->
-            synchronized(lock) {
-                awaiters.add { frameTime -> co.resumeWith(runCatching { onFrame(frameTime) }) }
-                if (!scheduledFrameDispatch) {
-                    scheduledFrameDispatch = true
-                    coroutineScope.launch {
-                        delay(frameDelayMillis)
-                        performFrame()
+        suspendComposeCancellableCoroutine { co ->
+            val awaiter: (Long) -> Unit = { frameTime ->
+                co.resumeWith(runCatching { onFrame(frameTime) })
+            }
+            val scheduleFrame =
+                synchronized(lock) {
+                    awaiters.add(awaiter)
+                    if (!scheduledFrameDispatch) {
+                        scheduledFrameDispatch = true
+                        autoScheduleFrameDispatch
+                    } else {
+                        false
                     }
+                }
+            co.invokeOnCancellation { synchronized(lock) { awaiters.remove(awaiter) } }
+            if (scheduleFrame) {
+                coroutineScope.launch {
+                    delay(frameDelayMillis)
+                    performFrame()
                 }
             }
         }
@@ -131,7 +151,7 @@ class TestMonotonicFrameClock(
      * next frame will actually be dispatched by `runRecomposeAndApplyChanges`'
      * `BroadcastFrameClock`, not this method.
      */
-    private fun performFrame() {
+    fun performFrame() {
         frameDeferringInterceptor.runWithoutResumingCoroutines {
             // This is set after acquiring the lock in case the virtual time was advanced while
             // waiting for it.

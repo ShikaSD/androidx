@@ -135,6 +135,30 @@ package androidx.compose.runtime {
   @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME) @kotlin.annotation.Target(allowedTargets={kotlin.annotation.AnnotationTarget.CLASS, kotlin.annotation.AnnotationTarget.FUNCTION, kotlin.annotation.AnnotationTarget.PROPERTY, kotlin.annotation.AnnotationTarget.TYPEALIAS}) public @interface ComposeCompilerApi {
   }
 
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public interface ComposeCoroutineHandle {
+    method public void cancel();
+    method @InaccessibleFromKotlin public boolean isActive();
+    method @InaccessibleFromKotlin public boolean isCompleted();
+    method public suspend Object? join(kotlin.coroutines.Continuation<? super kotlin.Unit>);
+    property public abstract boolean isActive;
+    property public abstract boolean isCompleted;
+  }
+
+  @SuppressCompatibility public final class ComposeCoroutineKt {
+    method @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public static androidx.compose.runtime.ComposeCoroutineHandle launchComposeCoroutine(kotlin.coroutines.CoroutineContext context, kotlin.jvm.functions.Function2<? super kotlinx.coroutines.CoroutineScope,? super kotlin.coroutines.Continuation<? super kotlin.Unit>,? extends java.lang.Object?> block);
+    method @KotlinOnly @SuppressCompatibility @androidx.compose.runtime.Composable @androidx.compose.runtime.InternalComposeApi public static androidx.compose.runtime.ComposeCoroutineScope rememberComposeCoroutineScope();
+    method @BytecodeOnly @SuppressCompatibility @androidx.compose.runtime.Composable @androidx.compose.runtime.InternalComposeApi public static androidx.compose.runtime.ComposeCoroutineScope rememberComposeCoroutineScope(androidx.compose.runtime.Composer?, int);
+  }
+
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public final class ComposeCoroutineScope implements kotlinx.coroutines.CoroutineScope androidx.compose.runtime.RememberObserver {
+    method @InaccessibleFromKotlin public kotlin.coroutines.CoroutineContext getCoroutineContext();
+    method public androidx.compose.runtime.ComposeCoroutineHandle launch(kotlin.jvm.functions.Function2<? super kotlinx.coroutines.CoroutineScope,? super kotlin.coroutines.Continuation<? super kotlin.Unit>,? extends java.lang.Object?> block);
+    method public void onAbandoned();
+    method public void onForgotten();
+    method public void onRemembered();
+    property public kotlin.coroutines.CoroutineContext coroutineContext;
+  }
+
   public interface ComposeNodeLifecycleCallback {
     method public void onDeactivate();
     method public void onRelease();

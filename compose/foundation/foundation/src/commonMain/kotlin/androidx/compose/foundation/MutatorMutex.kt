@@ -17,10 +17,14 @@
 package androidx.compose.foundation
 
 import androidx.compose.foundation.internal.PlatformOptimizedCancellationException
+import androidx.compose.runtime.ComposeCoroutineHandle
+import androidx.compose.runtime.InternalComposeApi
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.composeCoroutineHandle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -77,23 +81,40 @@ internal class MutationInterruptedException :
  * @sample androidx.compose.foundation.samples.mutatorMutexStateObject
  */
 @Stable
+@OptIn(InternalComposeApi::class)
 class MutatorMutex {
-    private class Mutator(val priority: MutatePriority, val job: Job) {
+    private class Mutator(
+        val priority: MutatePriority,
+        val composeHandle: ComposeCoroutineHandle?,
+        val job: Job?,
+    ) {
         fun canInterrupt(other: Mutator) = priority >= other.priority
 
-        fun cancel() = job.cancel(MutationInterruptedException())
+        fun cancel() {
+            composeHandle?.cancel() ?: job?.cancel(MutationInterruptedException())
+        }
+
+        suspend fun join() {
+            composeHandle?.join() ?: job?.join()
+        }
+
+        fun ensureActive() {
+            if (composeHandle?.isActive == false || job?.isActive == false) {
+                throw MutationInterruptedException()
+            }
+        }
     }
 
     private val currentMutator = AtomicReference<Mutator?>(null)
     private val mutex = Mutex()
 
-    private fun tryMutateOrCancel(mutator: Mutator) {
+    private fun tryMutateOrCancel(mutator: Mutator): Mutator? {
         while (true) {
             val oldMutator = currentMutator.get()
             if (oldMutator == null || mutator.canInterrupt(oldMutator)) {
                 if (currentMutator.compareAndSet(oldMutator, mutator)) {
                     oldMutator?.cancel()
-                    break
+                    return oldMutator
                 }
             } else throw CancellationException("Current mutation had a higher priority")
         }
@@ -117,16 +138,22 @@ class MutatorMutex {
     suspend fun <R> mutate(
         priority: MutatePriority = MutatePriority.Default,
         block: suspend () -> R,
-    ) = coroutineScope {
-        val mutator = Mutator(priority, coroutineContext[Job]!!)
+    ): R {
+        currentCoroutineContext().composeCoroutineHandle?.let { handle ->
+            return mutateWithComposeCoroutine(priority, handle, block)
+        }
 
-        tryMutateOrCancel(mutator)
+        return coroutineScope {
+            val mutator = Mutator(priority, composeHandle = null, job = coroutineContext[Job]!!)
 
-        mutex.withLock {
-            try {
-                block()
-            } finally {
-                currentMutator.compareAndSet(mutator, null)
+            tryMutateOrCancel(mutator)
+
+            mutex.withLock {
+                try {
+                    block()
+                } finally {
+                    currentMutator.compareAndSet(mutator, null)
+                }
             }
         }
     }
@@ -157,17 +184,43 @@ class MutatorMutex {
         receiver: T,
         priority: MutatePriority = MutatePriority.Default,
         block: suspend T.() -> R,
-    ) = coroutineScope {
-        val mutator = Mutator(priority, coroutineContext[Job]!!)
+    ): R {
+        currentCoroutineContext().composeCoroutineHandle?.let { handle ->
+            return mutateWithComposeCoroutine(priority, handle) { receiver.block() }
+        }
 
-        tryMutateOrCancel(mutator)
+        return coroutineScope {
+            val mutator = Mutator(priority, composeHandle = null, job = coroutineContext[Job]!!)
 
-        mutex.withLock {
-            try {
-                receiver.block()
-            } finally {
-                currentMutator.compareAndSet(mutator, null)
+            tryMutateOrCancel(mutator)
+
+            mutex.withLock {
+                try {
+                    receiver.block()
+                } finally {
+                    currentMutator.compareAndSet(mutator, null)
+                }
             }
+        }
+    }
+
+    private suspend fun <R> mutateWithComposeCoroutine(
+        priority: MutatePriority,
+        handle: ComposeCoroutineHandle,
+        block: suspend () -> R,
+    ): R {
+        val mutator = Mutator(priority, composeHandle = handle, job = null)
+        val oldMutator = tryMutateOrCancel(mutator)
+
+        if (oldMutator != null && oldMutator.composeHandle !== handle) {
+            oldMutator.join()
+        }
+        mutator.ensureActive()
+
+        try {
+            return block()
+        } finally {
+            currentMutator.compareAndSet(mutator, null)
         }
     }
 

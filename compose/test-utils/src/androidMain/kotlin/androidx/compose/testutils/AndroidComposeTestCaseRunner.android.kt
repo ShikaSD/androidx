@@ -95,7 +95,8 @@ internal class AndroidComposeTestCaseRunner<T : ComposeTestCase>(
     private val testCoroutineDispatcher = UnconfinedTestDispatcher()
     private val frameClock =
         TestMonotonicFrameClock(
-            CoroutineScope(testCoroutineDispatcher + testCoroutineDispatcher.scheduler)
+            CoroutineScope(testCoroutineDispatcher + testCoroutineDispatcher.scheduler),
+            autoScheduleFrameDispatch = false,
         )
 
     private val continuationCountInterceptor =
@@ -250,6 +251,9 @@ internal class AndroidComposeTestCaseRunner<T : ComposeTestCase>(
         if (hasPendingChanges()) {
             didLastRecomposeHaveChanges = true
             testCoroutineDispatcher.scheduler.advanceTimeBy(frameClock.frameDelayMillis)
+            if (frameClock.hasScheduledFrameDispatch) {
+                frameClock.performFrame()
+            }
             testCoroutineDispatcher.scheduler.runCurrent()
         } else {
             didLastRecomposeHaveChanges = false

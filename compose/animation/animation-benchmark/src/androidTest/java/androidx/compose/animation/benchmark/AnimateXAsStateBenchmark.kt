@@ -18,9 +18,14 @@ package androidx.compose.animation.benchmark
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.testutils.LayeredComposeTestCase
+import androidx.compose.testutils.ToggleableTestCase
 import androidx.compose.testutils.benchmark.ComposeBenchmarkRule
 import androidx.compose.testutils.benchmark.benchmarkFirstCompose
+import androidx.compose.testutils.benchmark.toggleStateBenchmarkRecompose
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import org.junit.Rule
@@ -33,11 +38,32 @@ class AnimateXAsStateBenchmark {
     @get:Rule val rule = ComposeBenchmarkRule()
 
     @Test fun animateFloat_compose() = rule.benchmarkFirstCompose(::AnimateFloatAsStateTestCase)
+
+    @Test
+    fun animateFloat_recompose() {
+        rule.toggleStateBenchmarkRecompose(
+            ::AnimateFloatAsStateRecomposeTestCase,
+            assertOneRecomposition = false,
+        )
+    }
 }
 
 private class AnimateFloatAsStateTestCase : LayeredComposeTestCase() {
     @Composable
     override fun MeasuredContent() {
         animateFloatAsState(targetValue = 0f)
+    }
+}
+
+private class AnimateFloatAsStateRecomposeTestCase : LayeredComposeTestCase(), ToggleableTestCase {
+    private var target by mutableStateOf(0f)
+
+    @Composable
+    override fun MeasuredContent() {
+        animateFloatAsState(targetValue = target)
+    }
+
+    override fun toggleState() {
+        target = if (target == 0f) 1f else 0f
     }
 }
