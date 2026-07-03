@@ -22,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -73,6 +74,60 @@ class ComposeCoroutineTest {
         job.cancel()
         job.join()
 
+        assertTrue(ranFinally)
+    }
+
+    @Test
+    fun singleThreadCancellationInvokesCancellationHandlerAndCompletes() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        var cancellationHandlerCalled = false
+        var caughtCancellation = false
+        var ranFinally = false
+        var resumedAfterCancellation = false
+        val job =
+            launchSingleThreadComposeCoroutine(coroutineContext) {
+                try {
+                    suspendComposeCancellableCoroutine<Unit> { continuation ->
+                        continuation.invokeOnCancellation { cancellationHandlerCalled = true }
+                        started.complete(Unit)
+                    }
+                    resumedAfterCancellation = true
+                } catch (e: CancellationException) {
+                    caughtCancellation = true
+                } finally {
+                    ranFinally = true
+                }
+            }
+
+        started.await()
+        job.cancel()
+        job.join()
+
+        assertTrue(cancellationHandlerCalled)
+        assertTrue(caughtCancellation)
+        assertTrue(ranFinally)
+        assertTrue(job.isCompleted)
+        assertFalse(job.isActive)
+        assertFalse(resumedAfterCancellation)
+    }
+
+    @Test
+    fun singleThreadSynchronousCancellationRunsFinallyBlock() = runBlocking {
+        var ranFinally = false
+        val job =
+            launchSingleThreadComposeCoroutine(coroutineContext) {
+                try {
+                    suspendComposeCancellableCoroutine<Unit> { continuation ->
+                        continuation.resumeWithException(CancellationException())
+                    }
+                } finally {
+                    ranFinally = true
+                }
+            }
+
+        job.join()
+
+        assertTrue(job.isCompleted)
         assertTrue(ranFinally)
     }
 
