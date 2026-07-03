@@ -18,8 +18,7 @@
 
 package androidx.compose.runtime
 
-import androidx.compose.runtime.internal.AtomicInt
-import androidx.compose.runtime.internal.AtomicReference
+import androidx.compose.runtime.internal.PlatformOptimizedCancellationException
 import androidx.compose.runtime.internal.currentThreadId
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.Continuation
@@ -203,12 +202,12 @@ private class ComposeCoroutineState(
     val fallbackContext: CoroutineContext,
     val fallbackInterceptor: ContinuationInterceptor?,
 ) {
-    private val handedOff = AtomicInt(0)
+    private var handedOff = false
 
-    fun shouldResumeDirectly(): Boolean = handedOff.get() == 0 && currentThreadId() == ownerThreadId
+    fun shouldResumeDirectly(): Boolean = !handedOff && currentThreadId() == ownerThreadId
 
     fun markHandedOff() {
-        handedOff.set(1)
+        handedOff = true
     }
 }
 
@@ -226,10 +225,9 @@ private class ComposeContinuation<T>(
     private val state: ComposeCoroutineState,
     private val continuation: Continuation<T>,
 ) : Continuation<T> {
-    private val cancellationResumed = AtomicInt(0)
-    private val cancellationCause = AtomicReference<CancellationException?>(null)
-    private val cancellationCallback =
-        AtomicReference<((CancellationException) -> Unit)?>(null)
+    private var cancellationResumed = false
+    private var cancellationCause: CancellationException? = null
+    private var cancellationCallback: ((CancellationException) -> Unit)? = null
 
     override val context: CoroutineContext
         get() = continuation.context
@@ -258,24 +256,23 @@ private class ComposeContinuation<T>(
     }
 
     fun cancel(cause: CancellationException) {
-        if (cancellationResumed.compareAndSet(0, 1)) {
-            cancellationCause.set(cause)
-            cancellationCallback.getAndSet(null)?.invoke(cause)
+        if (!cancellationResumed) {
+            cancellationResumed = true
+            cancellationCause = cause
+            val callback = cancellationCallback
+            cancellationCallback = null
+            callback?.invoke(cause)
             resume(Result.failure(cause))
         }
     }
 
     fun invokeOnCancellation(onCancellation: (CancellationException) -> Unit) {
-        val currentCause = cancellationCause.get()
+        val currentCause = cancellationCause
         if (currentCause != null) {
             onCancellation(currentCause)
             return
         }
-        cancellationCallback.set(onCancellation)
-        val racedCause = cancellationCause.get()
-        if (racedCause != null && cancellationCallback.compareAndSet(onCancellation, null)) {
-            onCancellation(racedCause)
-        }
+        cancellationCallback = onCancellation
     }
 
     private fun resumeWithFallback(result: Result<T>) {
@@ -301,25 +298,27 @@ private class ComposeContinuation<T>(
 
 private class ComposeSafeContinuation<T>(private val delegate: Continuation<T>) :
     Continuation<T> {
-    private val state = AtomicReference<Any?>(Undecided)
+    private var state: Any? = Undecided
 
     override val context: CoroutineContext
         get() = delegate.context
 
     override fun resumeWith(result: Result<T>) {
-        if (state.compareAndSet(Undecided, Completed(result))) return
-        if (state.compareAndSet(Suspended, Resumed)) {
-            delegate.resumeWith(result)
-            return
+        when (state) {
+            Undecided -> state = Completed(result)
+            Suspended -> {
+                state = Resumed
+                delegate.resumeWith(result)
+            }
+            else -> throw IllegalStateException("Already resumed")
         }
-        throw IllegalStateException("Already resumed")
     }
 
     fun getOrThrow(): Any? {
-        val current = state.get()
+        val current = state
         if (current === Undecided) {
-            if (state.compareAndSet(Undecided, Suspended)) return COROUTINE_SUSPENDED
-            return getOrThrow()
+            state = Suspended
+            return COROUTINE_SUSPENDED
         }
         if (current === Suspended) return COROUTINE_SUSPENDED
         @Suppress("UNCHECKED_CAST")
@@ -378,11 +377,7 @@ private class KotlinxComposeCancellableContinuation<T>(
 
     override fun invokeOnCancellation(onCancellation: (CancellationException) -> Unit) {
         continuation.invokeOnCancellation { cause ->
-            onCancellation(
-                parentCancellationException(
-                    cause ?: CancellationException("Compose coroutine continuation cancelled")
-                )
-            )
+            onCancellation(parentCancellationException(cause ?: CancelException))
         }
     }
 }
@@ -434,20 +429,19 @@ private class CompletedComposeCoroutine(val cause: Throwable?) : ComposeCoroutin
 
 @OptIn(InternalComposeApi::class)
 private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHandle {
-    private val state =
-        AtomicReference<ComposeCoroutineHandleState>(ActiveComposeCoroutine(null, emptyList()))
-    private val currentContinuation = AtomicReference<ComposeContinuation<*>?>(null)
-    private val currentKotlinxJob = AtomicReference<Job?>(null)
+    private var state: ComposeCoroutineHandleState = ActiveComposeCoroutine(null, emptyList())
+    private var currentContinuation: ComposeContinuation<*>? = null
+    private var currentKotlinxJob: Job? = null
     private val parentCompletionHandle: DisposableHandle?
 
     override val isActive: Boolean
         get() {
-            val current = state.get()
+            val current = state
             return current is ActiveComposeCoroutine && current.cancellationCause == null
         }
 
     override val isCompleted: Boolean
-        get() = state.get() is CompletedComposeCoroutine
+        get() = state is CompletedComposeCoroutine
 
     init {
         parentCompletionHandle =
@@ -462,30 +456,25 @@ private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHand
             }
 
         if (parentJob != null && !parentJob.isActive) {
-            cancel(CancellationException("Parent job is not active"))
+            cancel(CancelException)
         }
     }
 
     override fun cancel() {
-        cancel(CancellationException("Compose coroutine was cancelled"))
+        cancel(CancelException)
     }
 
     fun cancel(cause: CancellationException) {
-        while (true) {
-            when (val current = state.get()) {
-                is CompletedComposeCoroutine -> return
-                is ActiveComposeCoroutine -> {
-                    if (current.cancellationCause != null) return
-                    val next = ActiveComposeCoroutine(cause, current.joiners)
-                    if (state.compareAndSet(current, next)) {
-                        val job = currentKotlinxJob.get()
-                        if (job != null && job.isActive) {
-                            job.cancel(cause)
-                        } else {
-                            currentContinuation.get()?.cancel(cause)
-                        }
-                        return
-                    }
+        when (val current = state) {
+            is CompletedComposeCoroutine -> return
+            is ActiveComposeCoroutine -> {
+                if (current.cancellationCause != null) return
+                state = ActiveComposeCoroutine(cause, current.joiners)
+                val job = currentKotlinxJob
+                if (job != null && job.isActive) {
+                    job.cancel(cause)
+                } else {
+                    currentContinuation?.cancel(cause)
                 }
             }
         }
@@ -503,7 +492,7 @@ private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHand
     }
 
     fun ensureActive() {
-        val current = state.get()
+        val current = state
         if (current is ActiveComposeCoroutine && current.cancellationCause != null) {
             throw current.cancellationCause
         }
@@ -513,18 +502,20 @@ private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHand
     }
 
     fun register(continuation: ComposeContinuation<*>) {
-        currentContinuation.set(continuation)
+        currentContinuation = continuation
     }
 
     fun registerKotlinxJob(job: Job) {
-        currentKotlinxJob.set(job)
+        currentKotlinxJob = job
         job.invokeOnCompletion {
-            currentKotlinxJob.compareAndSet(job, null)
+            if (currentKotlinxJob === job) {
+                currentKotlinxJob = null
+            }
         }
     }
 
     fun complete() {
-        val current = state.get()
+        val current = state
         val cause =
             if (current is ActiveComposeCoroutine) {
                 current.cancellationCause
@@ -539,54 +530,47 @@ private class ComposeCoroutineHandleImpl(parentJob: Job?) : ComposeCoroutineHand
     }
 
     private fun complete(cause: Throwable?) {
-        var joiners: List<CancellableContinuation<Unit>> = emptyList()
-        while (true) {
-            when (val current = state.get()) {
+        val joiners =
+            when (val current = state) {
                 is CompletedComposeCoroutine -> return
-                is ActiveComposeCoroutine -> {
-                    joiners = current.joiners
-                    if (state.compareAndSet(current, CompletedComposeCoroutine(cause))) break
-                }
+                is ActiveComposeCoroutine -> current.joiners
             }
-        }
+        state = CompletedComposeCoroutine(cause)
         parentCompletionHandle?.dispose()
-        currentContinuation.set(null)
-        currentKotlinxJob.set(null)
+        currentContinuation = null
+        currentKotlinxJob = null
         joiners.forEach { it.resume(Unit) }
     }
 
     private fun addJoiner(continuation: CancellableContinuation<Unit>): Boolean {
-        while (true) {
-            when (val current = state.get()) {
-                is CompletedComposeCoroutine -> return false
-                is ActiveComposeCoroutine -> {
-                    val next =
-                        ActiveComposeCoroutine(
-                            current.cancellationCause,
-                            current.joiners + continuation,
-                        )
-                    if (state.compareAndSet(current, next)) return true
-                }
+        when (val current = state) {
+            is CompletedComposeCoroutine -> return false
+            is ActiveComposeCoroutine -> {
+                state =
+                    ActiveComposeCoroutine(
+                        current.cancellationCause,
+                        current.joiners + continuation,
+                    )
+                return true
             }
         }
     }
 
     private fun removeJoiner(continuation: CancellableContinuation<Unit>) {
-        while (true) {
-            when (val current = state.get()) {
-                is CompletedComposeCoroutine -> return
-                is ActiveComposeCoroutine -> {
-                    val next =
-                        ActiveComposeCoroutine(
-                            current.cancellationCause,
-                            current.joiners - continuation,
-                        )
-                    if (state.compareAndSet(current, next)) return
-                }
+        when (val current = state) {
+            is CompletedComposeCoroutine -> return
+            is ActiveComposeCoroutine -> {
+                state =
+                    ActiveComposeCoroutine(
+                        current.cancellationCause,
+                        current.joiners - continuation,
+                    )
             }
         }
     }
 }
 
 private fun parentCancellationException(cause: Throwable): CancellationException =
-    cause as? CancellationException ?: CancellationException("Parent job was cancelled: $cause")
+    cause as? CancellationException ?: CancelException
+
+private object CancelException : PlatformOptimizedCancellationException()
