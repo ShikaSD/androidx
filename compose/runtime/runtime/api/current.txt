@@ -1021,6 +1021,64 @@ package androidx.compose.runtime.internal {
 
 }
 
+package androidx.compose.runtime.internal.coroutines {
+
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public interface FastCancellableJob {
+    method public void cancel();
+    method @InaccessibleFromKotlin public boolean isActive();
+    method @InaccessibleFromKotlin public boolean isCancelled();
+    method @InaccessibleFromKotlin public boolean isCompleted();
+    property public abstract boolean isActive;
+    property public abstract boolean isCancelled;
+    property public abstract boolean isCompleted;
+  }
+
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public interface FastContinuation<T> {
+    method public void invokeOnCancellation(kotlin.jvm.functions.Function1<? super java.lang.Throwable,kotlin.Unit> handler);
+    method public void resume(T value);
+    method public void resumeWithException(Throwable exception);
+  }
+
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public final class FastCoroutinesPrototype {
+    ctor public FastCoroutinesPrototype();
+    ctor @BytecodeOnly public FastCoroutinesPrototype(kotlin.coroutines.CoroutineContext!, kotlin.jvm.functions.Function0!, int, kotlin.jvm.internal.DefaultConstructorMarker!);
+    ctor public FastCoroutinesPrototype(optional kotlin.coroutines.CoroutineContext kotlinxContext, optional kotlin.jvm.functions.Function0<kotlin.Unit>? onFrameRequested);
+    method public void advanceTimeBy(long millis);
+    method public void cancel();
+    method @InaccessibleFromKotlin public androidx.compose.runtime.MonotonicFrameClock getFrameClock();
+    method @InaccessibleFromKotlin public boolean hasFrameAwaiters();
+    method public androidx.compose.runtime.internal.coroutines.FastCancellableJob launch(kotlin.jvm.functions.Function2<? super androidx.compose.runtime.internal.coroutines.FastRestrictedScope,? super kotlin.coroutines.Continuation<? super kotlin.Unit>,? extends java.lang.Object?> block);
+    method public androidx.compose.runtime.internal.coroutines.FastCancellableJob launchWithScopedCleanup(kotlin.jvm.functions.Function2<? super androidx.compose.runtime.internal.coroutines.FastRestrictedScope,? super kotlin.coroutines.Continuation<? super kotlin.Unit>,? extends java.lang.Object?> block);
+    method public androidx.compose.runtime.internal.coroutines.FastMutator newMutator();
+    method public int pendingDelayCount();
+    method public int pump();
+    method public void sendFrame(long timeNanos);
+    method public String statsString();
+    property public androidx.compose.runtime.MonotonicFrameClock frameClock;
+    property public boolean hasFrameAwaiters;
+  }
+
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi public final class FastMutator {
+    method @InaccessibleFromKotlin public boolean isMutating();
+    property public boolean isMutating;
+  }
+
+  @SuppressCompatibility @androidx.compose.runtime.InternalComposeApi @kotlin.coroutines.RestrictsSuspension public final class FastRestrictedScope {
+    method public suspend Object? awaitCancellation(kotlin.coroutines.Continuation<? extends java.lang.Object?>);
+    method public suspend Object? delay(long millis, kotlin.coroutines.Continuation<? super kotlin.Unit>);
+    method public suspend Object? join(androidx.compose.runtime.internal.coroutines.FastCancellableJob other, kotlin.coroutines.Continuation<? super kotlin.Unit>);
+    method public androidx.compose.runtime.internal.coroutines.FastCancellableJob launch(optional boolean scopedCleanup, kotlin.jvm.functions.Function2<? super androidx.compose.runtime.internal.coroutines.FastRestrictedScope,? super kotlin.coroutines.Continuation<? super kotlin.Unit>,? extends java.lang.Object?> block);
+    method @BytecodeOnly public static androidx.compose.runtime.internal.coroutines.FastCancellableJob! launch$default(androidx.compose.runtime.internal.coroutines.FastRestrictedScope!, boolean, kotlin.jvm.functions.Function2!, int, Object!);
+    method public suspend <R> Object? mutate(androidx.compose.runtime.internal.coroutines.FastMutator mutator, optional int priority, kotlin.jvm.functions.Function2<? super androidx.compose.runtime.internal.coroutines.FastRestrictedScope,? super kotlin.coroutines.Continuation<? super R>,? extends java.lang.Object?> block, kotlin.coroutines.Continuation<? super R>);
+    method @BytecodeOnly public static Object! mutate$default(androidx.compose.runtime.internal.coroutines.FastRestrictedScope!, androidx.compose.runtime.internal.coroutines.FastMutator!, int, kotlin.jvm.functions.Function2!, kotlin.coroutines.Continuation!, int, Object!);
+    method public void onCleanup(kotlin.jvm.functions.Function0<kotlin.Unit> action);
+    method public suspend <T> Object? suspendCancellable(kotlin.jvm.functions.Function1<? super androidx.compose.runtime.internal.coroutines.FastContinuation<T>,kotlin.Unit> block, kotlin.coroutines.Continuation<? super T>);
+    method public suspend <R> Object? withFrameMillis(kotlin.jvm.functions.Function1<? super java.lang.Long,? extends R> onFrame, kotlin.coroutines.Continuation<? super R>);
+    method public suspend <R> Object? withFrameNanos(kotlin.jvm.functions.Function1<? super java.lang.Long,? extends R> onFrame, kotlin.coroutines.Continuation<? super R>);
+  }
+
+}
+
 package androidx.compose.runtime.reflect {
 
   public final class ComposableMethod {
