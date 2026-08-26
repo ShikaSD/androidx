@@ -18,6 +18,7 @@ package androidx.compose.runtime
 
 import androidx.collection.MutableObjectIntMap
 import androidx.collection.MutableScatterMap
+import androidx.collection.ObjectIntMap
 import androidx.collection.ScatterSet
 import androidx.compose.runtime.composer.gapbuffer.GapAnchor
 import androidx.compose.runtime.composer.gapbuffer.SlotTable
@@ -251,6 +252,18 @@ internal class RecomposeScopeImpl(internal var owner: RecomposeScopeOwner?) :
 
     private var currentToken = 0
     private var trackedInstances: MutableObjectIntMap<Any>? = null
+
+    /**
+     * The instances this scope has recorded a read of, or `null` if it has not recorded any.
+     *
+     * Every instance mapped to this scope in `CompositionImpl.observations` is a key of this map,
+     * so the scope's observations can be removed by walking this rather than scanning that map.
+     * Note that [release] clears this, so a released scope reports `null` here while it may still
+     * be present in `observations` until the composition sweeps it.
+     */
+    val recordedInstances: ObjectIntMap<Any>?
+        get() = trackedInstances
+
     private var trackedDependencies: MutableScatterMap<DerivedState<*>, Any?>? = null
     private var rereading: Boolean
         get() = getFlag(RereadingFlag)

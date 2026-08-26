@@ -620,10 +620,12 @@ internal class CompositionImpl(
     private var invalidations = ScopeMap<RecomposeScopeImpl, Any>()
 
     /**
-     * As [RecomposeScope]s are removed the corresponding entries in the observations set must be
-     * removed as well. This process is expensive so should only be done if it is certain the
-     * [observations] set contains [RecomposeScope] that is no longer needed. [pendingInvalidScopes]
-     * is set to true whenever a [RecomposeScope] is removed from the [slotStorage].
+     * Set to `true` whenever a [RecomposeScope] is removed from the [slotStorage].
+     *
+     * A released scope's own observations are removed eagerly in [recomposeScopeReleased], while it
+     * still knows which instances it read. What cannot be decided per scope is whether a derived
+     * state has become unobserved as a result, so this flag defers that single check to the end of
+     * [applyChangesInLocked] instead of repeating it for every released scope.
      */
     @Suppress("MemberVisibilityCanBePrivate") // published as internal
     internal var pendingInvalidScopes = false
@@ -1107,21 +1109,50 @@ internal class CompositionImpl(
         val conditionallyInvalidatedScopes = conditionallyInvalidatedScopes
         val invalidatedScopes = invalidatedScopes
         if (forgetConditionalScopes && conditionallyInvalidatedScopes.isNotEmpty()) {
-            observations.removeScopeIf { scope ->
-                scope in conditionallyInvalidatedScopes || scope in invalidatedScopes
-            }
+            removeObservationsOf(conditionallyInvalidatedScopes)
+            removeObservationsOf(invalidatedScopes)
             conditionallyInvalidatedScopes.clear()
             cleanUpDerivedStateObservations()
         } else if (invalidatedScopes.isNotEmpty()) {
-            observations.removeScopeIf { scope -> scope in invalidatedScopes }
+            removeObservationsOf(invalidatedScopes)
             cleanUpDerivedStateObservations()
             invalidatedScopes.clear()
         }
     }
 
+    /**
+     * Remove every observation recorded for [scopes].
+     *
+     * A scope is only in [observations] for instances it recorded a read of, so this walks
+     * [RecomposeScopeImpl.recordedInstances] instead of scanning [observations], whose cost is the
+     * size of the whole composition no matter how few scopes are being removed.
+     */
+    private fun removeObservationsOf(scopes: MutableScatterSet<RecomposeScopeImpl>) {
+        val observations = observations
+        scopes.forEach { scope ->
+            val recordedInstances = scope.recordedInstances
+            if (recordedInstances != null) {
+                recordedInstances.forEachKey { instance -> observations.remove(instance, scope) }
+            } else {
+                // A released scope drops its recorded instances, so there is no index to remove
+                // by. Such a scope reports IGNORED from invalidateForResult and should never
+                // reach here, but scan for it rather than leave a stale observation behind.
+                observations.removeScope(scope)
+            }
+        }
+    }
+
     private fun cleanUpDerivedStateObservations() {
-        derivedStates.removeScopeIf { derivedState -> derivedState !in observations }
-        derivedStateDependencyIndex.removeIf { derivedState, _ -> derivedState !in observations }
+        val derivedStates = derivedStates
+        derivedStateDependencyIndex.removeIf { derivedState, dependencies ->
+            (derivedState !in observations).also { willRemove ->
+                if (willRemove) {
+                    dependencies.forEachKey { dependency ->
+                        derivedStates.remove(dependency, derivedState)
+                    }
+                }
+            }
+        }
         if (conditionallyInvalidatedScopes.isNotEmpty()) {
             conditionallyInvalidatedScopes.removeIf { scope -> !scope.isConditional }
         }
@@ -1257,7 +1288,6 @@ internal class CompositionImpl(
             if (pendingInvalidScopes) {
                 trace("Compose:unobserve") {
                     pendingInvalidScopes = false
-                    observations.removeScopeIf { scope -> !scope.valid }
                     cleanUpDerivedStateObservations()
                 }
             }
@@ -1403,6 +1433,13 @@ internal class CompositionImpl(
     }
 
     override fun recomposeScopeReleased(scope: RecomposeScopeImpl) {
+        // Drop the scope's observations now, while its recorded instances are still available.
+        // release() clears them immediately after this returns, and once it has, the only way to
+        // find the scope in `observations` is to scan the whole map.
+        val recordedInstances = scope.recordedInstances
+        if (recordedInstances != null) {
+            recordedInstances.forEachKey { instance -> observations.remove(instance, scope) }
+        }
         pendingInvalidScopes = true
 
         observer()?.onScopeDisposed(scope)
