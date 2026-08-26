@@ -689,10 +689,6 @@ internal class CompositionImpl(
     /** True if [dispose] has been called. */
     private var state = RUNNING
 
-    /** True if a sub-composition of this composition is current composing. */
-    private val areChildrenComposing
-        get() = composer.areChildrenComposing
-
     /**
      * The [Composable] function used to define the tree managed by this composition. This is set by
      * [setContent].
@@ -1159,41 +1155,40 @@ internal class CompositionImpl(
     }
 
     override fun recordReadOf(value: Any) {
-        // Not acquiring lock since this happens during composition with it already held
-        if (!areChildrenComposing) {
-            composer.currentRecomposeScope?.let { scope ->
-                scope.used = true
+        // Not acquiring lock since this happens during composition with it already held.
+        // `currentRecomposeScope` is already null while children are composing, so there is no
+        // need to dispatch to the composer a second time to ask `areChildrenComposing`.
+        val scope = composer.currentRecomposeScope ?: return
+        scope.used = true
 
-                val alreadyRead = scope.recordRead(value)
+        val alreadyRead = scope.recordRead(value)
 
-                observer()?.onReadInScope(scope, value)
+        observerHolder.current()?.onReadInScope(scope, value)
 
-                if (!alreadyRead) {
-                    if (value is StateObjectImpl) {
-                        value.recordReadIn(ReaderKind.Composition)
-                    }
+        if (!alreadyRead) {
+            if (value is StateObjectImpl) {
+                value.recordReadIn(ReaderKind.Composition)
+            }
 
-                    observations.add(value, scope)
+            observations.add(value, scope)
 
-                    // Record derived state dependency mapping
-                    if (value is DerivedState<*>) {
-                        val record = value.currentRecord
-                        val dependencies = record.dependencies
-                        // Only re-index if the derived state recalculated since it was last read,
-                        // which is the only time its dependencies can have changed.
-                        if (derivedStateDependencyIndex[value] !== dependencies) {
-                            removeDerivedStateDependencies(value)
-                            dependencies.forEachKey { dependency ->
-                                if (dependency is StateObjectImpl) {
-                                    dependency.recordReadIn(ReaderKind.Composition)
-                                }
-                                derivedStates.add(dependency, value)
-                            }
-                            derivedStateDependencyIndex[value] = dependencies
+            // Record derived state dependency mapping
+            if (value is DerivedState<*>) {
+                val record = value.currentRecord
+                val dependencies = record.dependencies
+                // Only re-index if the derived state recalculated since it was last read, which
+                // is the only time its dependencies can have changed.
+                if (derivedStateDependencyIndex[value] !== dependencies) {
+                    removeDerivedStateDependencies(value)
+                    dependencies.forEachKey { dependency ->
+                        if (dependency is StateObjectImpl) {
+                            dependency.recordReadIn(ReaderKind.Composition)
                         }
-                        scope.recordDerivedStateValue(value, record.currentValue)
+                        derivedStates.add(dependency, value)
                     }
+                    derivedStateDependencyIndex[value] = dependencies
                 }
+                scope.recordDerivedStateValue(value, record.currentValue)
             }
         }
     }
@@ -1590,13 +1585,21 @@ internal object ScopeInvalidated
 internal class CompositionObserverHolder(
     var observer: CompositionObserver? = null,
     var root: Boolean = false,
-    private val parent: CompositionContext,
+    parent: CompositionContext,
 ) {
+    /**
+     * The parent context's holder, resolved once.
+     *
+     * [CompositionContext.observerHolder] is a constructor `val` in every implementation, so it
+     * cannot change for the lifetime of this holder. Resolving it here keeps [current] off a
+     * virtual call, which matters because it runs on every state read during composition.
+     */
+    private val parentHolder: CompositionObserverHolder? = parent.observerHolder
+
     fun current(): CompositionObserver? {
         return if (root) {
             observer
         } else {
-            val parentHolder = parent.observerHolder
             val parentObserver = parentHolder?.observer
             if (parentObserver != observer) {
                 observer = parentObserver
