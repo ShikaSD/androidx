@@ -262,6 +262,32 @@ internal class GapComposer(
 
     private val invalidateStack = Stack<RecomposeScopeImpl>()
 
+    /**
+     * The top of [invalidateStack], mirrored into a field.
+     *
+     * [currentRecomposeScope] is read on every state read during composition, so it reads this
+     * rather than indexing into the stack. Every mutation of [invalidateStack] goes through
+     * [pushInvalidateScope], [popInvalidateScope] and [clearInvalidateStack] to keep the two in
+     * sync; the stack is private, so there is no other way to change it.
+     */
+    private var topInvalidateScope: RecomposeScopeImpl? = null
+
+    private fun pushInvalidateScope(scope: RecomposeScopeImpl) {
+        invalidateStack.push(scope)
+        topInvalidateScope = scope
+    }
+
+    private fun popInvalidateScope(): RecomposeScopeImpl {
+        val scope = invalidateStack.pop()
+        topInvalidateScope = if (invalidateStack.isNotEmpty()) invalidateStack.peek() else null
+        return scope
+    }
+
+    private fun clearInvalidateStack() {
+        invalidateStack.clear()
+        topInvalidateScope = null
+    }
+
     override var isComposing = false
         private set
 
@@ -631,7 +657,7 @@ internal class GapComposer(
     }
 
     override fun deactivate() {
-        invalidateStack.clear()
+        clearInvalidateStack()
         invalidations.clear()
         changes.clear()
         providerUpdates = null
@@ -1272,10 +1298,7 @@ internal class GapComposer(
     }
 
     override val currentRecomposeScope: RecomposeScopeImpl?
-        get() =
-            invalidateStack.let {
-                if (childrenComposing == 0 && it.isNotEmpty()) it.peek() else null
-            }
+        get() = if (childrenComposing == 0) topInvalidateScope else null
 
     private fun ensureWriter() {
         if (writer.closed) {
@@ -1693,7 +1716,7 @@ internal class GapComposer(
                 // If the invalidation is not used restore the reads that were removed when the
                 // the invalidation was recorded. This happens, for example, when on of a derived
                 // state's dependencies changed but the derived state itself was not changed.
-                invalidateStack.push(scope)
+                pushInvalidateScope(scope)
                 val observer = observerHolder.current()
                 if (observer != null) {
                     try {
@@ -1705,7 +1728,7 @@ internal class GapComposer(
                 } else {
                     scope.rereadTrackedInstances()
                 }
-                invalidateStack.pop()
+                popInvalidateScope()
             }
 
             // Using slots.current here ensures composition always walks forward even if a component
@@ -2115,7 +2138,7 @@ internal class GapComposer(
     private fun addRecomposeScope() {
         if (inserting) {
             val scope = RecomposeScopeImpl(composition as CompositionImpl)
-            invalidateStack.push(scope)
+            pushInvalidateScope(scope)
             updateValue(scope)
             enterRecomposeScope(scope)
         } else {
@@ -2134,7 +2157,7 @@ internal class GapComposer(
                     scope.forcedRecompose.also { forced ->
                         if (forced) scope.forcedRecompose = false
                     }
-            invalidateStack.push(scope)
+            pushInvalidateScope(scope)
             enterRecomposeScope(scope)
 
             if (scope.paused) {
@@ -2166,7 +2189,7 @@ internal class GapComposer(
         // This allows for the invalidate stack to be out of sync since this might be called during
         // exception stack unwinding that might have not called the doneJoin/endRestartGroup in the
         // the correct order.
-        val scope = if (invalidateStack.isNotEmpty()) invalidateStack.pop() else null
+        val scope = if (invalidateStack.isNotEmpty()) popInvalidateScope() else null
         if (scope != null) {
             scope.requiresRecompose = false
             exitRecomposeScope(scope)?.let { changeListWriter.endCompositionScope(it, composition) }
@@ -2908,7 +2931,7 @@ internal class GapComposer(
         compositeKeyHashCode = EmptyCompositeKeyHashCode
         nodeExpected = false
         changeListWriter.resetTransientState()
-        invalidateStack.clear()
+        clearInvalidateStack()
         clearUpdatedNodeCounts()
     }
 

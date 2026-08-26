@@ -346,6 +346,32 @@ internal class LinkComposer(
 
     private val invalidateStack = Stack<RecomposeScopeImpl>()
 
+    /**
+     * The top of [invalidateStack], mirrored into a field.
+     *
+     * [currentRecomposeScope] is read on every state read during composition, so it reads this
+     * rather than indexing into the stack. Every mutation of [invalidateStack] goes through
+     * [pushInvalidateScope], [popInvalidateScope] and [clearInvalidateStack] to keep the two in
+     * sync; the stack is private, so there is no other way to change it.
+     */
+    private var topInvalidateScope: RecomposeScopeImpl? = null
+
+    private fun pushInvalidateScope(scope: RecomposeScopeImpl) {
+        invalidateStack.push(scope)
+        topInvalidateScope = scope
+    }
+
+    private fun popInvalidateScope(): RecomposeScopeImpl {
+        val scope = invalidateStack.pop()
+        topInvalidateScope = if (invalidateStack.isNotEmpty()) invalidateStack.peek() else null
+        return scope
+    }
+
+    private fun clearInvalidateStack() {
+        invalidateStack.clear()
+        topInvalidateScope = null
+    }
+
     override var isComposing = false
         private set
 
@@ -356,10 +382,7 @@ internal class LinkComposer(
         get() = childrenComposing > 0
 
     override val currentRecomposeScope: RecomposeScopeImpl?
-        get() =
-            invalidateStack.let {
-                if (childrenComposing == 0 && it.isNotEmpty()) it.peek() else null
-            }
+        get() = if (childrenComposing == 0) topInvalidateScope else null
 
     /**
      * Returns the hash of the composite key calculated as a combination of the keys of all the
@@ -650,7 +673,7 @@ internal class LinkComposer(
 
     /** See [InternalComposer.deactivate] */
     override fun deactivate() {
-        invalidateStack.clear()
+        clearInvalidateStack()
         invalidations.clear()
         changes.clear()
         providerUpdates = null
@@ -718,7 +741,7 @@ internal class LinkComposer(
         // This allows for the invalidate stack to be out of sync since this might be called during
         // exception stack unwinding that might have not called the doneJoin/endRestartGroup in the
         // the correct order.
-        val scope = if (invalidateStack.isNotEmpty()) invalidateStack.pop() else null
+        val scope = if (invalidateStack.isNotEmpty()) popInvalidateScope() else null
         if (scope != null) {
             scope.requiresRecompose = false
             exitRecomposeScope(scope)?.let { changeListWriter.endCompositionScope(it, composition) }
@@ -1382,7 +1405,7 @@ internal class LinkComposer(
     private fun addRecomposeScope() {
         if (inserting) {
             val scope = RecomposeScopeImpl(owner = composition)
-            invalidateStack.push(scope)
+            pushInvalidateScope(scope)
             updateValue(scope)
             enterRecomposeScope(scope)
         } else {
@@ -1404,7 +1427,7 @@ internal class LinkComposer(
                     scope.forcedRecompose.also { forced ->
                         if (forced) scope.forcedRecompose = false
                     }
-            invalidateStack.push(scope)
+            pushInvalidateScope(scope)
             enterRecomposeScope(scope)
 
             if (scope.paused) {
@@ -1426,7 +1449,7 @@ internal class LinkComposer(
         groupNodeCount = 0
         compositeKeyHashCode = EmptyCompositeKeyHashCode
         nodeExpected = false
-        invalidateStack.clear()
+        clearInvalidateStack()
         clearUpdatedNodeCounts()
     }
 
@@ -2139,7 +2162,7 @@ internal class LinkComposer(
                         // when the invalidation was recorded. This happens, for example, when on of
                         // a derived state's dependencies changed but the derived state itself was
                         // not changed.
-                        invalidateStack.push(scope)
+                        pushInvalidateScope(scope)
                         val observer = observerHolder.current()
                         if (observer != null) {
                             try {
@@ -2151,7 +2174,7 @@ internal class LinkComposer(
                         } else {
                             scope.rereadTrackedInstances()
                         }
-                        invalidateStack.pop()
+                        popInvalidateScope()
 
                         // Let the iteration know we are skipping the group
                         false
