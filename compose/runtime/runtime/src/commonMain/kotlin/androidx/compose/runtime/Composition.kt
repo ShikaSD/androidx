@@ -18,7 +18,9 @@
 
 package androidx.compose.runtime
 
+import androidx.collection.MutableScatterMap
 import androidx.collection.MutableScatterSet
+import androidx.collection.ObjectIntMap
 import androidx.collection.ObjectList
 import androidx.collection.ScatterMap
 import androidx.collection.ScatterSet
@@ -35,6 +37,7 @@ import androidx.compose.runtime.internal.trace
 import androidx.compose.runtime.platform.makeSynchronizedObject
 import androidx.compose.runtime.platform.synchronized
 import androidx.compose.runtime.snapshots.ReaderKind
+import androidx.compose.runtime.snapshots.StateObject
 import androidx.compose.runtime.snapshots.StateObjectImpl
 import androidx.compose.runtime.snapshots.fastAll
 import androidx.compose.runtime.snapshots.fastAny
@@ -555,6 +558,21 @@ internal class CompositionImpl(
 
     /** A map of object read during derived states to the corresponding derived state. */
     private val derivedStates = ScopeMap<Any, DerivedState<*>>()
+
+    /**
+     * The dependency map that was last indexed into [derivedStates] for a given derived state.
+     *
+     * [DerivedState.Record.dependencies] is replaced wholesale whenever the derived state is
+     * recalculated and is left untouched otherwise, so an identity match means the entries in
+     * [derivedStates] are already up to date and the re-indexing in [recordReadOf] can be skipped.
+     * When it does not match, the previous dependencies tell us exactly which entries to remove,
+     * which avoids scanning all of [derivedStates].
+     *
+     * A derived state has an entry here if, and only if, its dependencies are indexed in
+     * [derivedStates]. All removals go through [removeDerivedStateDependencies] to maintain this.
+     */
+    private val derivedStateDependencyIndex =
+        MutableScatterMap<DerivedState<*>, ObjectIntMap<StateObject>>()
 
     /** Used for testing. Returns dependencies of derived states that are currently observed. */
     internal val derivedStateDependencies
@@ -1103,6 +1121,7 @@ internal class CompositionImpl(
 
     private fun cleanUpDerivedStateObservations() {
         derivedStates.removeScopeIf { derivedState -> derivedState !in observations }
+        derivedStateDependencyIndex.removeIf { derivedState, _ -> derivedState !in observations }
         if (conditionallyInvalidatedScopes.isNotEmpty()) {
             conditionallyInvalidatedScopes.removeIf { scope -> !scope.isConditional }
         }
@@ -1128,12 +1147,18 @@ internal class CompositionImpl(
                     // Record derived state dependency mapping
                     if (value is DerivedState<*>) {
                         val record = value.currentRecord
-                        derivedStates.removeScope(value)
-                        record.dependencies.forEachKey { dependency ->
-                            if (dependency is StateObjectImpl) {
-                                dependency.recordReadIn(ReaderKind.Composition)
+                        val dependencies = record.dependencies
+                        // Only re-index if the derived state recalculated since it was last read,
+                        // which is the only time its dependencies can have changed.
+                        if (derivedStateDependencyIndex[value] !== dependencies) {
+                            removeDerivedStateDependencies(value)
+                            dependencies.forEachKey { dependency ->
+                                if (dependency is StateObjectImpl) {
+                                    dependency.recordReadIn(ReaderKind.Composition)
+                                }
+                                derivedStates.add(dependency, value)
                             }
-                            derivedStates.add(dependency, value)
+                            derivedStateDependencyIndex[value] = dependencies
                         }
                         scope.recordDerivedStateValue(value, record.currentValue)
                     }
@@ -1449,8 +1474,19 @@ internal class CompositionImpl(
     internal fun removeDerivedStateObservation(state: DerivedState<*>) {
         // remove derived state if it is not observed in other scopes
         if (state !in observations) {
-            derivedStates.removeScope(state)
+            removeDerivedStateDependencies(state)
         }
+    }
+
+    /**
+     * Remove the [derivedStates] entries that were recorded for [state] by [recordReadOf].
+     *
+     * This uses the dependencies recorded in [derivedStateDependencyIndex] to remove only the
+     * entries that were actually added, rather than scanning the whole [derivedStates] map.
+     */
+    private fun removeDerivedStateDependencies(state: DerivedState<*>) {
+        val dependencies = derivedStateDependencyIndex.remove(state) ?: return
+        dependencies.forEachKey { dependency -> derivedStates.remove(dependency, state) }
     }
 
     /**
@@ -1497,6 +1533,7 @@ internal class CompositionImpl(
             }
             observations.clear()
             derivedStates.clear()
+            derivedStateDependencyIndex.clear()
             invalidations.clear()
             changes.clear()
             lateChanges.clear()
