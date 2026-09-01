@@ -569,7 +569,8 @@ internal class CompositionImpl(
      * which avoids scanning all of [derivedStates].
      *
      * A derived state has an entry here if, and only if, its dependencies are indexed in
-     * [derivedStates]. All removals go through [removeDerivedStateDependencies] to maintain this.
+     * [derivedStates]. [recordReadOf] replaces an entry in place when the dependencies change, and
+     * every other removal goes through [removeDerivedStateDependencies], to maintain this.
      */
     private val derivedStateDependencyIndex =
         MutableScatterMap<DerivedState<*>, ObjectIntMap<StateObject>>()
@@ -1176,10 +1177,16 @@ internal class CompositionImpl(
             if (value is DerivedState<*>) {
                 val record = value.currentRecord
                 val dependencies = record.dependencies
+                val previousDependencies = derivedStateDependencyIndex[value]
                 // Only re-index if the derived state recalculated since it was last read, which
                 // is the only time its dependencies can have changed.
-                if (derivedStateDependencyIndex[value] !== dependencies) {
-                    removeDerivedStateDependencies(value)
+                if (previousDependencies !== dependencies) {
+                    val derivedStates = derivedStates
+                    if (previousDependencies != null) {
+                        previousDependencies.forEachKey { dependency ->
+                            derivedStates.remove(dependency, value)
+                        }
+                    }
                     dependencies.forEachKey { dependency ->
                         if (dependency is StateObjectImpl) {
                             dependency.recordReadIn(ReaderKind.Composition)

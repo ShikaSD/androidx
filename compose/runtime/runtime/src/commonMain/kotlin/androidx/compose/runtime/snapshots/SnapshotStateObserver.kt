@@ -454,8 +454,9 @@ public class SnapshotStateObserver(private val onChangedExecutor: (callback: () 
          * entries to remove, which avoids scanning all of [dependencyToDerivedStates].
          *
          * A derived state has an entry here if, and only if, its dependencies are indexed in
-         * [dependencyToDerivedStates]. All removals go through [removeDerivedStateDependencies] to
-         * maintain this.
+         * [dependencyToDerivedStates]. [recordRead] replaces an entry in place when the
+         * dependencies change, and every other removal goes through
+         * [removeDerivedStateDependencies], to maintain this.
          */
         private var _derivedStateDependencyIndex:
             MutableScatterMap<DerivedState<*>, ObjectIntMap<StateObject>>? =
@@ -510,12 +511,16 @@ public class SnapshotStateObserver(private val onChangedExecutor: (callback: () 
                 recordedDerivedStateValues[value] = record.currentValue
 
                 val dependencies = record.dependencies
+                val previousDependencies = derivedStateDependencyIndex[value]
                 // Only re-index if the derived state recalculated since it was last read, which
                 // is the only time its dependencies can have changed.
-                if (derivedStateDependencyIndex[value] !== dependencies) {
-                    removeDerivedStateDependencies(value)
-
+                if (previousDependencies !== dependencies) {
                     val dependencyToDerivedStates = dependencyToDerivedStates
+                    if (previousDependencies != null) {
+                        previousDependencies.forEachKey { dependency ->
+                            dependencyToDerivedStates.remove(dependency, value)
+                        }
+                    }
                     dependencies.forEachKey { dependency ->
                         if (dependency is StateObjectImpl) {
                             dependency.recordReadIn(ReaderKind.SnapshotStateObserver)
